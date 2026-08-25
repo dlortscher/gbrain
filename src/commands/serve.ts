@@ -21,6 +21,8 @@ import {
 // Guarded by test/serve-stdin-eof-drain.test.ts's source-text check.
 type ServeSyncRunnerModule = typeof import('../core/serve-sync-runner.ts');
 const loadSyncRunner = (): Promise<ServeSyncRunnerModule> => import('../core/serve-sync-runner.ts');
+type ServeDreamRunnerModule = typeof import('../core/serve-dream-runner.ts');
+const loadDreamRunner = (): Promise<ServeDreamRunnerModule> => import('../core/serve-dream-runner.ts');
 
 // Maximum time the stdio path will wait for engine.disconnect() (PGLite
 // close + advisory lock release) before forcing exit. Keeps a wedged
@@ -477,11 +479,9 @@ function installStdioLifecycle(
     // A running delegated sync extends the deadline by exactly its settle
     // bound: shutdownDelegatedSync must finish its abort+settle against the
     // live engine BEFORE disconnect, and a fixed 5s would force-exit mid-
-    // settle (second-outside-voice finding EV1). #4409: the runner loads
-    // lazily inside the chain (module-cache hit when a sync ever ran; a
-    // fresh load trivially reports no sync running), so the deadline arms
-    // at the base bound first and re-arms with the settle extension once
-    // the runner state is known.
+    // settle (second-outside-voice finding EV1). #4409: both runners load
+    // lazily inside the chain, so the deadline arms at the base bound first
+    // and re-arms with the largest settle extension once their state is known.
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const armDeadline = (ms: number): void => {
       deadline = setTimeout(() => {
@@ -499,13 +499,18 @@ function installStdioLifecycle(
       // the same signals; whichever runs first does the abort+settle, the
       // other awaits it. Must precede disconnect (settle writes need the
       // live engine; the disconnect-mode drain is allowAbort:false).
-      .then(() => loadSyncRunner())
-      .then((runner) => {
-        if (runner.isDelegatedSyncRunning()) {
+      .then(() => Promise.all([loadSyncRunner(), loadDreamRunner()]))
+      .then(async ([syncRunner, dreamRunner]) => {
+        const settleExtensionMs = Math.max(
+          syncRunner.isDelegatedSyncRunning() ? syncRunner.delegatedSyncSettleMs() : 0,
+          dreamRunner.isDelegatedDreamRunning() ? dreamRunner.delegatedDreamSettleMs() : 0,
+        );
+        if (settleExtensionMs > 0) {
           if (deadline) clearTimeout(deadline);
-          armDeadline(CLEANUP_DEADLINE_MS + runner.delegatedSyncSettleMs());
+          armDeadline(CLEANUP_DEADLINE_MS + settleExtensionMs);
         }
-        return runner.shutdownDelegatedSync();
+        await syncRunner.shutdownDelegatedSync();
+        await dreamRunner.shutdownDelegatedDream();
       })
       .then(() => engine.disconnect())
       .catch((err: unknown) => {

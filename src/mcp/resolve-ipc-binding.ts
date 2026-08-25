@@ -46,7 +46,7 @@ export interface ResolveIpcBinding {
 const NULL_BINDING: ResolveIpcBinding = { server: null, socketPath: null, close: () => {} };
 
 /**
- * Bind the resolve/turn_context/context_pack (+ delegated sync/sweep) IPC
+ * Bind the resolve/turn_context/context_pack (+ delegated sync/sweep/Dream) IPC
  * listener for a running serve. `defaultSource` is the serve's bound source
  * (resolveMcpStdioSourceScope) — the IPC layer rejects requests naming any
  * other source ([CX2-10]).
@@ -114,6 +114,27 @@ export async function bindResolveIpcForServe(
       }
     }
 
+    // Serve-delegated Dream uses the same authenticated local delegation
+    // family and kill switch as sync/sweep. Keep registration isolated so a
+    // Dream runner load failure cannot take retrieval IPC down with it.
+    let dreamHandlers: Pick<IpcHandlers, 'dream_start' | 'dream_status'> = {};
+    if (process.env.GBRAIN_SERVE_SYNC_IPC !== '0') {
+      try {
+        const dreamRunner = await import('../core/serve-dream-runner.ts');
+        dreamHandlers = {
+          dream_start: (req) =>
+            dreamRunner.startDelegatedDream(engine, req.options, req.clientToken, {
+              boundSourceId: defaultSource,
+            }),
+          dream_status: (req) => dreamRunner.getDelegatedDreamStatus(req.runId),
+        };
+      } catch (e) {
+        process.stderr.write(
+          `[serve-dream] handlers unavailable: ${e instanceof Error ? e.message : String(e)}\n`,
+        );
+      }
+    }
+
     const server = await startResolveIpcServer(
       resolveSocket,
       {
@@ -164,6 +185,7 @@ export async function bindResolveIpcForServe(
         context_pack: makeContextPackIpcHandler(engine, defaultSource),
         ...syncHandlers,
         ...sweepHandlers,
+        ...dreamHandlers,
       },
       {
         // The IPC resolve path IS the ambient reflex channel. Logging happens
