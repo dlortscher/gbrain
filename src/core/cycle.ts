@@ -52,6 +52,7 @@ import { getCliOptions, cliOptsToProgressOptions } from './cli-options.ts';
 import { tryAcquireDbLock, reapDeadHolderLocks, LockStolenError, type DbLockHandle } from './db-lock.ts';
 import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
+import { resolveExecutingGitCommit } from './git-commit.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 
@@ -364,6 +365,8 @@ export type CycleStatus = 'ok' | 'clean' | 'partial' | 'skipped' | 'failed';
 export interface CycleReport {
   /** Additive schema. Bumped on breaking changes. */
   schema_version: '1';
+  /** Exact source revision that produced this report; null when unavailable. */
+  git_commit?: string | null;
   timestamp: string;
   duration_ms: number;
   /**
@@ -1859,6 +1862,7 @@ export async function runCycle(
   opts: CycleOpts,
 ): Promise<CycleReport> {
   const start = performance.now();
+  const gitCommit = resolveExecutingGitCommit();
   const requestedPhases = opts.phases ?? ALL_PHASES;
   const phases = resolveCyclePhases(opts.phases, opts.sourceId);
   const excludedPhases = requestedPhases.filter((phase) => !phases.includes(phase));
@@ -1932,6 +1936,7 @@ export async function runCycle(
         if (pgliteFileLock === null) {
           return {
             schema_version: '1',
+            git_commit: gitCommit,
             timestamp,
             duration_ms: Math.round(performance.now() - start),
             status: 'skipped',
@@ -1958,6 +1963,7 @@ export async function runCycle(
         }
         return {
           schema_version: '1',
+          git_commit: gitCommit,
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'failed',
@@ -1985,6 +1991,7 @@ export async function runCycle(
         }
         return {
           schema_version: '1',
+          git_commit: gitCommit,
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'skipped',
@@ -2035,6 +2042,7 @@ export async function runCycle(
       if (lock === null) {
         return {
           schema_version: '1',
+          git_commit: gitCommit,
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'skipped',
@@ -3047,6 +3055,7 @@ export async function runCycle(
 
   return {
     schema_version: '1',
+    git_commit: gitCommit,
     timestamp,
     duration_ms,
     status: effectiveStatus,
