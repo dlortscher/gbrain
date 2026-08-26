@@ -21,16 +21,19 @@ describe('serve-delegated Dream runtime wiring', () => {
   });
 
   test('MCP serve registers both Dream handlers and settles Dream before disconnect', () => {
-    const source = read('src/mcp/server.ts');
-    expect(source).toContain('dream_start:');
-    expect(source).toContain('dream_status:');
-    expect(source).toContain('shutdownDelegatedDream');
-    expect(source.indexOf('shutdownDelegatedDream')).toBeLessThan(source.indexOf('engine.disconnect?.()'));
+    const binding = read('src/mcp/resolve-ipc-binding.ts');
+    expect(binding).toContain('dream_start:');
+    expect(binding).toContain('dream_status:');
+
+    const server = read('src/mcp/server.ts');
+    expect(server).toContain('shutdownDelegatedDream');
+    expect(server.indexOf('shutdownDelegatedDream')).toBeLessThan(server.indexOf('engine.disconnect?.()'));
   });
 
   test('command-level serve shutdown also settles Dream before disconnect', () => {
     const source = read('src/commands/serve.ts');
-    expect(source).toContain('shutdownDelegatedDream');
-    expect(source.indexOf('shutdownDelegatedDream')).toBeLessThan(source.indexOf('engine.disconnect()'));
+    const shutdown = source.slice(source.indexOf('const beginShutdown'));
+    expect(shutdown).toContain('dreamRunner.shutdownDelegatedDream');
+    expect(shutdown.indexOf('dreamRunner.shutdownDelegatedDream')).toBeLessThan(shutdown.indexOf('.then(() => engine.disconnect())'));
   });
 });
