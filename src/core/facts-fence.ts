@@ -53,6 +53,57 @@ import {
 export const FACTS_FENCE_BEGIN = '<!--- gbrain:facts:begin -->';
 export const FACTS_FENCE_END   = '<!--- gbrain:facts:end -->';
 
+/**
+ * Keep a complete `## Facts` section in compiled truth, above the canonical
+ * timeline split. Only a balanced fence with its own adjacent heading moves;
+ * marker-shaped text inside code fences and malformed sections stay put.
+ */
+export function normalizeFactsFencePlacement(body: string): string {
+  const lines = body.split(/(?<=\n)/);
+  let offset = 0;
+  let inCodeFence = false;
+  let timelineStart = -1;
+  let factsHeadingStart = -1;
+  let factsBeginStart = -1;
+  let factsEndEnd = -1;
+
+  for (const line of lines) {
+    const content = line.replace(/\r?\n$/, '');
+    const trimmed = content.trim();
+    if (/^\s*(`{3,}|~{3,})/.test(content)) {
+      inCodeFence = !inCodeFence;
+      offset += line.length;
+      continue;
+    }
+    if (!inCodeFence) {
+      if (timelineStart === -1 && (trimmed === '<!-- timeline -->' || trimmed === '<!--timeline-->')) {
+        timelineStart = offset;
+      } else if (timelineStart !== -1 && trimmed === '## Facts') {
+        factsHeadingStart = offset;
+      } else if (timelineStart !== -1 && trimmed === FACTS_FENCE_BEGIN) {
+        if (factsHeadingStart !== -1 && body.slice(factsHeadingStart + '## Facts'.length, offset).trim() === '') {
+          factsBeginStart = offset;
+        }
+      } else if (factsBeginStart !== -1 && trimmed === FACTS_FENCE_END) {
+        factsEndEnd = offset + content.length;
+        break;
+      }
+    }
+    offset += line.length;
+  }
+
+  if (timelineStart === -1 || factsHeadingStart === -1 || factsBeginStart === -1 || factsEndEnd === -1) {
+    return body;
+  }
+
+  const section = body.slice(factsHeadingStart, factsEndEnd).trim();
+  const withoutSection = body.slice(0, factsHeadingStart) + body.slice(factsEndEnd);
+  const beforeTimeline = withoutSection.slice(0, timelineStart).trimEnd();
+  const timelineAndAfter = withoutSection.slice(timelineStart).trim();
+  const finalNewline = /\r?\n$/.test(body) ? '\n' : '';
+  return `${beforeTimeline}\n\n${section}\n\n${timelineAndAfter}${finalNewline}`;
+}
+
 // Mirror src/core/engine.ts FactKind. Re-declared (not imported) because
 // the fence parser has zero engine dependencies — it must run in pure-
 // markdown contexts (the chunker strip, the CI invariant check) where
@@ -511,7 +562,7 @@ export function upsertFactRow(
     const sep = body.endsWith('\n') ? '\n' : '\n\n';
     out = `${body}${sep}## Facts\n\n${newFence}\n`;
   }
-  return { body: out, rowNum: nextRowNum };
+  return { body: normalizeFactsFencePlacement(out), rowNum: nextRowNum };
 }
 
 export interface StripFactsFenceOpts {

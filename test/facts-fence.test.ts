@@ -131,6 +131,27 @@ describe('parseFactsFence — canonical happy path', () => {
   });
 });
 
+describe('upsertFactRow — timeline sentinel ordering', () => {
+  test('creates a new Facts section before an existing timeline sentinel', () => {
+    const body = '# Person\n\nCompiled truth.\n\n<!-- timeline -->\n\n## Timeline\n\n- 2026-01-01: Met.\n';
+    const result = upsertFactRow(body, {
+      claim: 'Prefers concise updates',
+      kind: 'preference',
+      confidence: 1,
+      visibility: 'private',
+      notability: 'medium',
+      validFrom: '2026-08-26',
+      source: 'user',
+    });
+
+    expect(result.body.indexOf('## Facts')).toBeGreaterThan(-1);
+    expect(result.body.indexOf('## Facts')).toBeLessThan(result.body.indexOf('<!-- timeline -->'));
+    expect(result.body).toContain('## Timeline\n\n- 2026-01-01: Met.');
+    expect(result.body.endsWith('\n')).toBe(true);
+    expect(result.body.endsWith('\n\n')).toBe(false);
+  });
+});
+
 describe('parseFactsFence — strikethrough semantics (Codex R2-#3 contract)', () => {
   test('strikethrough + "superseded by #N" context → supersededBy populated', () => {
     const body = wrapFenceBody(

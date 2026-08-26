@@ -19,7 +19,7 @@ import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
 import { isFactsBackstopEligible } from '../facts/eligibility.ts';
 import { stripTakesFence } from '../takes-fence.ts';
 import type { WriterLintPayload } from '../output/post-write.ts';
-import { stripFactsFence } from '../facts-fence.ts';
+import { normalizeFactsFencePlacement, stripFactsFence } from '../facts-fence.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
@@ -378,6 +378,12 @@ const put_page: Operation = {
   handler: async (ctx, p) => {
     const slug = p.slug as string;
 
+    // Keep the facts system-of-record in compiled truth. A full-page MCP
+    // payload may carry a complete Facts fence after the timeline sentinel;
+    // normalize before parse/split so write-through cannot preserve that
+    // structurally invalid ordering.
+    const content = normalizeFactsFencePlacement(p.content as string);
+
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
     // autopilot, dream cycle, file watcher) may populate source_kind /
@@ -423,7 +429,7 @@ const put_page: Operation = {
     // write below targets (engine.putPage defaults to 'default' when
     // sourceId is unset). New-slug creates and soft-deleted-page overwrites
     // stay allowed — nothing recoverable is lost there.
-    if ((p.content as string).trim() === '' && p.allow_empty !== true) {
+    if (content.trim() === '' && p.allow_empty !== true) {
       const existing = await ctx.engine.getPage(slug, { sourceId: ctx.sourceId ?? 'default' });
       const existingBody = existing
         ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
@@ -468,7 +474,7 @@ const put_page: Operation = {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
     }
-    const result = await importFromContent(ctx.engine, slug, p.content as string, {
+    const result = await importFromContent(ctx.engine, slug, content, {
       noEmbed,
       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
