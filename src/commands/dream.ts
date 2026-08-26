@@ -34,6 +34,7 @@ import {
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { fetchSource } from '../core/sources-load.ts';
+import type { DelegatedDreamOptions } from '../core/context/dream-ipc.ts';
 import { existsSync } from 'fs';
 import { resolve } from 'node:path';
 
@@ -372,6 +373,7 @@ async function resolveBrainDir(
 
 function printHelp() {
   console.log(`Usage: gbrain dream [options]
+       gbrain dream status [run-id] [--json]
        gbrain dream retriage [flags]   (see: gbrain dream retriage --help)
 
 Run one brain maintenance cycle. Eight phases:
@@ -394,6 +396,8 @@ Options:
                       but skips the synthesis subagents.
                       "--dry-run" does NOT mean "zero LLM calls."
   --json              Emit the CycleReport as JSON (agent-readable)
+  --no-delegate       Force local execution. With PGLite, first close any live
+                      gbrain serve that owns the database lock.
   --phase <name>      Run only the named phase(s). Repeatable — every named
                       phase runs, in canonical cycle order (#4493).
                       Valid: ${ALL_PHASES.join(' | ')}
@@ -657,7 +661,48 @@ async function runDrain(
   if (result.remaining === null || result.remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
 }
 
-export async function runDream(engine: BrainEngine | null, args: string[]): Promise<CycleReport | void> {
+interface DreamRuntimeOpts {
+  /** Suppress CLI output and exit verdicts for in-process serve execution. */
+  silent?: boolean;
+  signal?: AbortSignal;
+}
+
+/** Rebuild the existing CLI contract from the narrow delegated wire shape. */
+export function delegatedDreamOptionsToArgs(options: DelegatedDreamOptions): string[] {
+  const args: string[] = [];
+  if (options.sourceId) args.push('--source', options.sourceId);
+  if (options.dryRun) args.push('--dry-run');
+  if (options.pull) args.push('--pull');
+  if (options.phase) args.push('--phase', options.phase);
+  if (options.date) args.push('--date', options.date);
+  if (options.from) args.push('--from', options.from);
+  if (options.to) args.push('--to', options.to);
+  if (options.once) args.push('--once');
+  return args;
+}
+
+/**
+ * No-output entrypoint for the process that already owns the engine. It calls
+ * the same parser, source resolution, directory resolution, and runCycle path
+ * as the direct CLI; only presentation and process-exit behavior are removed.
+ */
+export async function executeDreamCycle(
+  engine: BrainEngine,
+  options: DelegatedDreamOptions & { signal: AbortSignal },
+): Promise<CycleReport> {
+  const result = await runDream(engine, delegatedDreamOptionsToArgs(options), {
+    silent: true,
+    signal: options.signal,
+  });
+  if (!result) throw new Error('delegated Dream produced no cycle report');
+  return result;
+}
+
+export async function runDream(
+  engine: BrainEngine | null,
+  args: string[],
+  runtime: DreamRuntimeOpts = {},
+): Promise<CycleReport | void> {
   // ─── `dream retriage` subverb (#4152) — dispatched BEFORE parseArgs so its
   // flag set never collides with the cycle flags. `dream --help` never reaches
   // here (args[0] is '--help'); `dream retriage --help` prints subcommand help
@@ -708,16 +753,17 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   let resolvedSourceId: string | undefined;
   if (opts.source !== null) {
     if (engine === null) {
-      console.error(
-        'gbrain dream --source <id> requires a connected brain ' +
-        '(no engine available); omit --source or run `gbrain init` first',
-      );
+      const message = 'gbrain dream --source <id> requires a connected brain ' +
+        '(no engine available); omit --source or run `gbrain init` first';
+      if (runtime.silent) throw new Error(message);
+      console.error(message);
       process.exit(1);
     }
     try {
       resolvedSourceId = await resolveSourceId(engine, opts.source);
     } catch (e) {
       if (isResolverUserError(e)) {
+        if (runtime.silent) throw e;
         console.error((e as Error).message);
         process.exit(1);
       }
@@ -731,10 +777,10 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     // doesn't project the archived column, so it cannot be used here.
     const src = await fetchSource(engine, resolvedSourceId);
     if (src?.archived === true) {
-      console.error(
-        `source ${resolvedSourceId} is archived; restore with ` +
-        `\`gbrain sources restore ${resolvedSourceId}\` before cycling`,
-      );
+      const message = `source ${resolvedSourceId} is archived; restore with ` +
+        `\`gbrain sources restore ${resolvedSourceId}\` before cycling`;
+      if (runtime.silent) throw new Error(message);
+      console.error(message);
       process.exit(1);
     }
   }
@@ -745,10 +791,10 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // no checkout, the cycle skips filesystem phases and runs DB-only phases
   // (resolve_symbol_edges, embed, orphans, ...) — the postgres support path.
   if (brainDir === null && engine === null) {
-    console.error(
-      'No brain directory found and no database connection. ' +
-      'Pass --dir <path> or configure a brain via `gbrain init`.',
-    );
+    const message = 'No brain directory found and no database connection. ' +
+      'Pass --dir <path> or configure a brain via `gbrain init`.';
+    if (runtime.silent) throw new Error(message);
+    console.error(message);
     process.exit(1);
   }
 
@@ -797,17 +843,20 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     // issue #2860: exactly one phase is guaranteed here when opts.once is
     // set (parseArgs enforces --once requires a single explicit --phase).
     onceForPhase: opts.once ? opts.phases[0]! : undefined,
+    signal: runtime.signal,
   });
 
-  if (opts.json) {
-    console.log(JSON.stringify(report, null, 2));
-  } else {
-    printHuman(report);
+  if (!runtime.silent) {
+    if (opts.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      printHuman(report);
+    }
   }
 
   // Exit non-zero when the cycle failed overall (helps cron spot real problems).
   // 'partial' is not a failure — it means some phase warned but the cycle ran.
-  if (report.status === 'failed') {
+  if (!runtime.silent && report.status === 'failed') {
     process.exit(1);
   }
 

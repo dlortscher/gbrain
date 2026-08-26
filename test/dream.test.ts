@@ -22,7 +22,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runDream } from '../src/commands/dream.ts';
+import { executeDreamCycle, runDream } from '../src/commands/dream.ts';
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -609,6 +609,20 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     errSpy.mockRestore();
   });
 
+  test('serve-owned execution rejects an unknown source without exiting the process', async () => {
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    try {
+      await expect(executeDreamCycle(engine, {
+        sourceId: 'unknown-source',
+        timeoutSeconds: 60,
+        signal: new AbortController().signal,
+      })).rejects.toThrow();
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
   // ─── Archived source guard (D2) ─────────────────────────────────────
 
   test('--source <archived> exits 1 and leaves last_full_cycle_at untouched', async () => {
@@ -634,6 +648,21 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     expect(after).toBeNull(); // archived guard prevents writeback
     exitSpy.mockRestore();
     errSpy.mockRestore();
+  });
+
+  test('serve-owned execution rejects an archived source without exiting the process', async () => {
+    await seedSource('archived-serve-source', true);
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    try {
+      await expect(executeDreamCycle(engine, {
+        sourceId: 'archived-serve-source',
+        timeoutSeconds: 60,
+        signal: new AbortController().signal,
+      })).rejects.toThrow(/archived/);
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
   });
 
   // ─── Happy path: --source writes last_full_cycle_at (the bug fix) ───

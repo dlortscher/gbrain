@@ -2347,6 +2347,24 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
 
+  // Dream status is filesystem-only and must work while a live serve owns
+  // PGLite. Read the durable run receipt before the early Dream dispatch.
+  if (command === 'dream' && args[0] === 'status') {
+    const { runDreamStatus } = await import('./commands/dream-delegate.ts');
+    setCliExitVerdict(runDreamStatus(args.slice(1)));
+    return;
+  }
+
+  // Serve-delegated Dream must also precede the early Dream dispatch below;
+  // the normal path intentionally tolerates DB connection failure.
+  if (command === 'dream') {
+    const cfgDream = loadConfig();
+    const { isPgliteDreamConfig, maybeDelegateDreamToServe, resolveDreamDataDir } = await import('./commands/dream-delegate.ts');
+    if (isPgliteDreamConfig(cfgDream)) {
+      if (await maybeDelegateDreamToServe(resolveDreamDataDir(cfgDream?.database_path), args)) return;
+    }
+  }
+
   if (command === 'dream') {
     // Dream mirrors doctor's pattern: filesystem phases run without a DB,
     // so an engine connection failure is non-fatal. runCycle honestly
@@ -2680,6 +2698,7 @@ async function handleCliOnly(command: string, args: string[]) {
       process.exit(1);
     }
   }
+
 
   // Serve-delegated sync preflight (PGLite host brains only): a live `gbrain
   // serve` owns the single-writer lock, so connectEngine below would throw

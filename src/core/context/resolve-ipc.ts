@@ -78,6 +78,12 @@ import type {
   SweepStatusRequest,
   SweepStatusResponse,
 } from './sweep-ipc.ts';
+import type {
+  DreamStartRequest,
+  DreamStartResponse,
+  DreamStatusRequest,
+  DreamStatusResponse,
+} from './dream-ipc.ts';
 
 const SOCK_NAME = '.gbrain-resolve.sock';
 const SECRET_NAME = '.gbrain-ipc-secret';
@@ -114,6 +120,8 @@ export const SYNC_ABORT_CLIENT_TIMEOUT_MS = 1000;
  */
 export const SWEEP_START_CLIENT_TIMEOUT_MS = 1500;
 export const SWEEP_STATUS_CLIENT_TIMEOUT_MS = 1000;
+export const DREAM_START_CLIENT_TIMEOUT_MS = 1500;
+export const DREAM_STATUS_CLIENT_TIMEOUT_MS = 1000;
 const MAX_MSG_BYTES = 256 * 1024;
 
 /** Marker the client returns when no server is reachable (vs. a real null result). */
@@ -222,7 +230,9 @@ export type IpcRequest =
   | SyncStatusRequest
   | SyncAbortRequest
   | SweepStartRequest
-  | SweepStatusRequest;
+  | SweepStatusRequest
+  | DreamStartRequest
+  | DreamStatusRequest;
 
 export interface ResolveResponse {
   ok: boolean;
@@ -257,6 +267,8 @@ export type SyncStatusIpcHandler = (req: SyncStatusRequest) => SyncStatusRespons
 export type SyncAbortIpcHandler = (req: SyncAbortRequest) => SyncAbortResponse | Promise<SyncAbortResponse>;
 export type SweepStartIpcHandler = (req: SweepStartRequest) => SweepStartResponse | Promise<SweepStartResponse>;
 export type SweepStatusIpcHandler = (req: SweepStatusRequest) => SweepStatusResponse | Promise<SweepStatusResponse>;
+export type DreamStartIpcHandler = (req: DreamStartRequest) => DreamStartResponse | Promise<DreamStartResponse>;
+export type DreamStatusIpcHandler = (req: DreamStatusRequest) => DreamStatusResponse | Promise<DreamStatusResponse>;
 
 /** Handler MAP replacing the single closure [ENG-3]. */
 export interface IpcHandlers {
@@ -268,6 +280,8 @@ export interface IpcHandlers {
   sync_abort?: SyncAbortIpcHandler;
   sweep_start?: SweepStartIpcHandler;
   sweep_status?: SweepStatusIpcHandler;
+  dream_start?: DreamStartIpcHandler;
+  dream_status?: DreamStatusIpcHandler;
 }
 
 export interface IpcServerOpts {
@@ -649,6 +663,31 @@ export async function requestSweepStatus(
   return syncRoundTrip<SweepStatusResponse>(socketPath, line, opts.timeoutMs ?? SWEEP_STATUS_CLIENT_TIMEOUT_MS);
 }
 
+// ── Serve-delegated Dream clients ─────────────────────────────────────────
+
+export type DreamStartClientRequest = Omit<DreamStartRequest, 'kind' | 'protocol'>;
+export type DreamStatusClientRequest = Omit<DreamStatusRequest, 'kind' | 'protocol'>;
+export type DreamStartIpcResult = DreamStartResponse | TurnContextStaleServe | typeof IPC_UNAVAILABLE;
+export type DreamStatusIpcResult = DreamStatusResponse | TurnContextStaleServe | typeof IPC_UNAVAILABLE;
+
+export async function requestDreamStart(
+  socketPath: string,
+  req: DreamStartClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<DreamStartIpcResult> {
+  const line = JSON.stringify({ kind: 'dream_start', protocol: 2, ...req } satisfies DreamStartRequest);
+  return syncRoundTrip<DreamStartResponse>(socketPath, line, opts.timeoutMs ?? DREAM_START_CLIENT_TIMEOUT_MS);
+}
+
+export async function requestDreamStatus(
+  socketPath: string,
+  req: DreamStatusClientRequest,
+  opts: { timeoutMs?: number } = {},
+): Promise<DreamStatusIpcResult> {
+  const line = JSON.stringify({ kind: 'dream_status', protocol: 2, ...req } satisfies DreamStatusRequest);
+  return syncRoundTrip<DreamStatusResponse>(socketPath, line, opts.timeoutMs ?? DREAM_STATUS_CLIENT_TIMEOUT_MS);
+}
+
 async function syncRoundTrip<Resp extends { ok: boolean; protocol: 2 }>(
   socketPath: string,
   line: string,
@@ -833,6 +872,14 @@ export async function startResolveIpcServer(
           } else if (kind === 'sweep_status') {
             resp = JSON.stringify(
               await handleSyncKind(parsed as SweepStatusRequest, handlers.sweep_status, opts),
+            );
+          } else if (kind === 'dream_start') {
+            resp = JSON.stringify(
+              await handleSyncKind(parsed as DreamStartRequest, handlers.dream_start, opts),
+            );
+          } else if (kind === 'dream_status') {
+            resp = JSON.stringify(
+              await handleSyncKind(parsed as DreamStatusRequest, handlers.dream_status, opts),
             );
           } else {
             resp = JSON.stringify({ ok: false, error: `unknown_kind:${String(kind)}` });

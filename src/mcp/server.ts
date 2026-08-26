@@ -244,6 +244,9 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
       // final checkpoint flush and row-lock release need the live engine.
       .then(() => import('../core/serve-sync-runner.ts').then((m) => m.shutdownDelegatedSync()))
       .catch(() => {})
+      // Dream owns the same live engine and must settle before disconnect too.
+      .then(() => import('../core/serve-dream-runner.ts').then((m) => m.shutdownDelegatedDream()))
+      .catch(() => {})
       .then(() => Promise.resolve(engine.disconnect?.()))
       .catch(() => {})
       .finally(() => process.exit(code));
