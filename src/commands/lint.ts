@@ -304,7 +304,15 @@ export function lintContent(content: string, filePath: string, opts: LintContent
     }
   }
 
-  return issues;
+  const firstHeading = content.search(/^#{1,6}\s/m);
+  const lintPreamble = firstHeading >= 0 ? content.slice(0, firstHeading) : content;
+  const suppressibleRules = new Set(['empty-section']);
+  const suppressedRules = new Set(
+    [...lintPreamble.matchAll(/<!--\s*gbrain:lint-disable\s+([a-z][a-z0-9-]*)\s*-->/gi)]
+      .map(match => match[1].toLowerCase())
+      .filter(rule => suppressibleRules.has(rule)),
+  );
+  return issues.filter(issue => !suppressedRules.has(issue.rule));
 }
 
 /**
@@ -430,12 +438,13 @@ async function resolveLintContentSanity(
 
 /**
  * Directories never containing knowledge pages, skipped by default.
- * Deliberately tiny: only vendored dependency trees qualify. Anything
- * more opinionated (README.md, CHANGELOG.md, test/) is repo policy —
- * callers opt in via `--exclude` / `LintOpts.exclude`. Dot- and
+ * Deliberately tiny: only vendored dependency trees qualify. Dot- and
  * underscore-prefixed entries are already skipped by the walk.
  */
 const DEFAULT_LINT_EXCLUDE_DIRS = new Set(['node_modules']);
+
+/** Repository-control markdown is not a knowledge page. Exact basenames only. */
+const DEFAULT_LINT_EXCLUDE_FILES = new Set(['readme.md', 'index.md', 'schema.md', 'log.md']);
 
 /** Collect markdown files from a directory */
 function collectPages(dir: string, extraExcludes: string[] = []): string[] {
@@ -449,7 +458,7 @@ function collectPages(dir: string, extraExcludes: string[] = []): string[] {
         if (DEFAULT_LINT_EXCLUDE_DIRS.has(entry) || extra.has(entry)) continue;
         walk(full);
       } else if (entry.endsWith('.md')) {
-        if (extra.has(entry)) continue;
+        if (DEFAULT_LINT_EXCLUDE_FILES.has(entry.toLowerCase()) || extra.has(entry)) continue;
         pages.push(full);
       }
     }

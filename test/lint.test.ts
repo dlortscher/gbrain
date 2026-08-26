@@ -106,6 +106,25 @@ describe('lintContent', () => {
     expect(issues.some(i => i.rule === 'empty-section' && i.message.includes('What They Believe'))).toBe(true);
   });
 
+  test('a file-local directive suppresses only the named rule', () => {
+    const content = '---\ntitle: Tasks\ntype: concept\n---\n\n<!-- gbrain:lint-disable empty-section -->\n\n# Tasks\n\n## P0 — Urgent\n\n## Backlog\n\n- [ ] Work';
+    const issues = lintContent(content, 'ops/tasks.md');
+    expect(issues.some(i => i.rule === 'empty-section')).toBe(false);
+    expect(issues.some(i => i.rule === 'missing-created')).toBe(true);
+  });
+
+  test('ignores lint-disable comments appearing after page content begins', () => {
+    const content = '---\ntitle: Tasks\ntype: concept\ncreated: 2026-04-11\n---\n\n# Tasks\n\n<!-- gbrain:lint-disable empty-section -->\n\n## P0 — Urgent\n\n## Backlog\n\n- [ ] Work';
+    const issues = lintContent(content, 'ops/tasks.md');
+    expect(issues.some(i => i.rule === 'empty-section')).toBe(true);
+  });
+
+  test('does not allow file-local directives to suppress protected huge-page findings', () => {
+    const content = '---\ntitle: Large\ntype: note\ncreated: 2026-04-11\n---\n\n<!-- gbrain:lint-disable huge-page -->\n\n# Large\n\n' + 'x'.repeat(200_000);
+    const issues = lintContent(content, 'large.md');
+    expect(issues.some(i => i.rule === 'huge-page')).toBe(true);
+  });
+
   test('detects agent placeholder sections', () => {
     const content = '---\ntitle: Test\ntype: person\ncreated: 2026-04-11\n---\n\n# Test\n\n## Summary\n\n*[To be filled by agent]*\n\n## State\n\nContent.';
     const issues = lintContent(content, 'test.md');
@@ -167,6 +186,10 @@ describe('runLintCore exclude (takeover of #2649)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-lint-excl-'));
     writeFileSync(join(dir, 'page.md'), PAGE);
     writeFileSync(join(dir, 'README.md'), PAGE);
+    writeFileSync(join(dir, 'INDEX.md'), PAGE);
+    writeFileSync(join(dir, 'schema.md'), PAGE);
+    writeFileSync(join(dir, 'log.md'), PAGE);
+    writeFileSync(join(dir, 'changelog.md'), PAGE);
     mkdirSync(join(dir, 'node_modules', 'dep'), { recursive: true });
     writeFileSync(join(dir, 'node_modules', 'dep', 'vendor.md'), PAGE);
     mkdirSync(join(dir, 'software'));
@@ -174,11 +197,11 @@ describe('runLintCore exclude (takeover of #2649)', () => {
     return dir;
   }
 
-  test('node_modules is excluded by default; nothing else is', async () => {
+  test('repository-control basenames and node_modules are excluded by default', async () => {
     const dir = makeRepo();
     try {
       const result = await runLintCore({ target: dir, contentSanity: { disabled: true } });
-      // page.md + README.md + software/notes.md — vendor.md skipped.
+      // Knowledge pages remain; README/index/schema/log and vendor content are skipped.
       expect(result.pages_scanned).toBe(3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -191,7 +214,7 @@ describe('runLintCore exclude (takeover of #2649)', () => {
       const result = await runLintCore({
         target: dir,
         contentSanity: { disabled: true },
-        exclude: ['software', 'README.md'],
+        exclude: ['software', 'changelog.md'],
       });
       expect(result.pages_scanned).toBe(1); // only page.md
     } finally {
