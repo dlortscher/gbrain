@@ -75,6 +75,7 @@ describe('runPhaseLint — result-mapping', () => {
       expect(result.error).toBeUndefined();
       expect(typeof result.summary).toBe('string');
       expect(result.summary.length).toBeGreaterThan(0);
+      expect(result.details.rule_counts).toEqual({ 'missing-created': 1 });
     } finally {
       cleanupBrain();
     }

@@ -1,5 +1,20 @@
 import { describe, test, expect } from 'bun:test';
-import { lintContent, fixContent } from '../src/commands/lint.ts';
+import { lintContent, fixContent, summarizeLintRules } from '../src/commands/lint.ts';
+
+describe('summarizeLintRules', () => {
+  test('returns deterministic counts keyed by stable rule name', () => {
+    const issues = [
+      { file: 'a.md', line: 1, rule: 'empty-section', message: 'empty', fixable: false },
+      { file: 'b.md', line: 2, rule: 'no-frontmatter', message: 'missing', fixable: false },
+      { file: 'c.md', line: 3, rule: 'empty-section', message: 'empty', fixable: false },
+    ];
+
+    expect(summarizeLintRules(issues)).toEqual({
+      'empty-section': 2,
+      'no-frontmatter': 1,
+    });
+  });
+});
 
 describe('lintContent', () => {
   test('detects LLM preamble "Of course"', () => {

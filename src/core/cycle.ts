@@ -53,8 +53,16 @@ import { tryAcquireDbLock, reapDeadHolderLocks, LockStolenError, type DbLockHand
 import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 import { resolveExecutingGitCommit } from './git-commit.ts';
+import {
+  deriveStatus,
+  emptyAttentionSummary,
+  cycleReportStateKey, prepareCycleReporting, shouldPersistCycleReport,
+  type AttentionSummary,
+  type CycleAttention,
+} from './cycle/report-attention.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
+export { deriveStatus } from './cycle/report-attention.ts';
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -378,6 +386,10 @@ export interface CycleReport {
    *   - 'failed'  : lock acquired but all attempted phases failed
    */
   status: CycleStatus;
+  /** Independent operator-attention signal; status remains backward-compatible. */
+  attention?: CycleAttention;
+  /** Findings grouped by actionability rather than raw phase status. */
+  attention_summary?: AttentionSummary;
   /** Present when status = 'skipped'. E.g., 'cycle_already_running' or 'no_database'. Also 'aborted' when the cycle was cancelled mid-flight (#1972), or 'stamp_write_failed' (#3504). */
   reason?: string;
   /**
@@ -1062,7 +1074,7 @@ export async function runPhaseLint(brainDir: string, dryRun: boolean, engine?: B
       summary: dryRun
         ? `${issues} issue(s) found (dry-run, no writes)`
         : `${fixed} fix(es) applied, ${remaining} remaining`,
-      details: { issues, fixed, pages_scanned: result.pages_scanned, dryRun },
+      details: { issues, fixed, rule_counts: result.rule_counts, pages_scanned: result.pages_scanned, dryRun },
     };
   } catch (e) {
     return {
@@ -1940,6 +1952,8 @@ export async function runCycle(
             timestamp,
             duration_ms: Math.round(performance.now() - start),
             status: 'skipped',
+            attention: 'none',
+            attention_summary: emptyAttentionSummary(),
             reason: 'cycle_already_running',
             brain_dir: opts.brainDir,
             phases: [],
@@ -1967,6 +1981,15 @@ export async function runCycle(
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'failed',
+          attention: 'needs_attention',
+          attention_summary: {
+            ...emptyAttentionSummary(),
+            needs_attention: [{
+              phase: 'sync', code: 'lock_acquisition_error', message: 'could not acquire cycle lock',
+              severity: 'error', actionability: 'needs_attention',
+              fingerprint: 'cycle-lock-acquisition', consecutive_runs: 1,
+            }],
+          },
           reason: 'lock_acquisition_error',
           brain_dir: opts.brainDir,
           phases: [
@@ -1995,6 +2018,8 @@ export async function runCycle(
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'skipped',
+          attention: 'none',
+          attention_summary: emptyAttentionSummary(),
           reason: 'cycle_already_running',
           brain_dir: opts.brainDir,
           phases: [],
@@ -2046,6 +2071,8 @@ export async function runCycle(
           timestamp,
           duration_ms: Math.round(performance.now() - start),
           status: 'skipped',
+          attention: 'none',
+          attention_summary: emptyAttentionSummary(),
           reason: 'cycle_already_running',
           brain_dir: opts.brainDir,
           phases: [],
@@ -3052,6 +3079,13 @@ export async function runCycle(
   // wins the reason slot, since an aborted run is the more fundamental fact.
   const degradedByStamp = stampWriteFailed !== undefined && (status === 'ok' || status === 'clean');
   const effectiveStatus: CycleStatus = aborted ? 'partial' : degradedByStamp ? 'partial' : status;
+  const attentionResult = prepareCycleReporting({
+    phases: phaseResults,
+    statePath: gbrainPath('cycle-report-state', `${cycleReportStateKey(opts.sourceId ?? cycleSourceId ?? 'global')}.json`),
+    dryRun,
+    completed: shouldPersistCycleReport(effectiveStatus, aborted, lockStolenAbort),
+    stampFailure: stampWriteFailed?.error,
+  });
 
   return {
     schema_version: '1',
@@ -3059,6 +3093,8 @@ export async function runCycle(
     timestamp,
     duration_ms,
     status: effectiveStatus,
+    attention: attentionResult.attention,
+    attention_summary: attentionResult.summary,
     ...(lockStolenAbort ? { reason: 'lock_stolen' } : aborted ? { reason: 'aborted' } : stampWriteFailed ? { reason: 'stamp_write_failed' } : {}),
     ...(stampWriteFailed ? { stamp_write_failed: stampWriteFailed } : {}),
     ...(reapedLocks ? { reaped_dead_holder_locks: reapedLocks } : {}),
@@ -3139,51 +3175,6 @@ function extractTotals(phases: PhaseResult[]): CycleReport['totals'] {
     }
   }
   return t;
-}
-
-export function deriveStatus(phases: PhaseResult[], totals: CycleReport['totals']): CycleStatus {
-  // #4250: exclusion bookkeeping records (the implicit source-cycle scope
-  // filter's synthetic skips) are not attempted phases and must not dilute
-  // failure aggregation. Pre-fix, an implicit source cycle whose SIX real
-  // freshness phases ALL failed still carried seventeen exclusion skips, so
-  // `allFailed` was false, status became 'partial', and the stamp gate
-  // (which accepts 'partial') marked a totally-failed source fresh —
-  // suppressing its retry forever. Score only attempted phases; fall back to
-  // the full list if somehow every record is an exclusion (unreachable via
-  // current callers — SOURCE_FRESHNESS_PHASES is never empty).
-  // Exported for test-only consumption; downstream code should NOT call it.
-  const attempted = phases.filter(
-    p => p.details?.reason !== 'excluded_from_implicit_source_cycle',
-  );
-  if (attempted.length > 0) phases = attempted;
-  if (phases.length === 0) return 'failed';
-  const anyFailed = phases.some(p => p.status === 'fail');
-  const allFailed = phases.every(p => p.status === 'fail');
-  const anyWarn = phases.some(p => p.status === 'warn');
-  if (allFailed) return 'failed';
-  if (anyFailed || anyWarn) return 'partial';
-  // All phases 'ok' or 'skipped'. Distinguish clean (no activity) from ok (work done).
-  const anyWork =
-    totals.lint_fixes > 0 ||
-    totals.backlinks_added > 0 ||
-    totals.pages_synced > 0 ||
-    totals.pages_extracted > 0 ||
-    totals.pages_embedded > 0 ||
-    totals.pages_emotional_weight_recomputed > 0 ||
-    // A7: a code brain runs `gbrain dream` specifically to build the call graph
-    // (resolve_symbol_edges). Without these, an edges-only cycle reports 'clean'
-    // — indistinguishable from "nothing happened" even when N edges resolved.
-    totals.edges_resolved > 0 ||
-    totals.edges_ambiguous > 0 ||
-    // `gbrain dream --input <file>` implies `--phase synthesize` (a
-    // synthesize-only cycle never touches sync/embed/etc, so those totals
-    // stay zero even on a genuinely productive run). Without these two, a
-    // real synthesize outcome — new pages written, or an already-completed
-    // transcript quietly reusing its prior job via the queue's
-    // idempotency_key dedupe — is indistinguishable from "nothing happened".
-    totals.transcripts_processed > 0 ||
-    totals.synth_pages_written > 0;
-  return anyWork ? 'ok' : 'clean';
 }
 
 // ── Test-only export ───────────────────────────────────────

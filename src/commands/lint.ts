@@ -37,6 +37,13 @@ export interface LintIssue {
   fixable: boolean;
 }
 
+/** Deterministic rule histogram for machine-readable reports and baselines. */
+export function summarizeLintRules(issues: readonly LintIssue[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const issue of issues) counts[issue.rule] = (counts[issue.rule] ?? 0) + 1;
+  return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 /** Map of frontmatter validation codes to lint rule names. Stable across
  *  releases — agents and CI consumers can target specific rule names. */
 const FRONTMATTER_RULE_NAMES: Record<ParseValidationCode, string> = {
@@ -508,6 +515,8 @@ export interface LintResult {
    *  report can't send the operator on a no-op --fix run. */
   total_fixable: number;
   total_fixed: number;
+  /** Stable rule-name histogram across this exact scan. */
+  rule_counts: Record<string, number>;
   dryRun: boolean;
   applied_fix: boolean;
 }
@@ -540,6 +549,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
   let totalFixable = 0;
   let totalFixed = 0;
   let pagesWithIssues = 0;
+  const ruleCounts: Record<string, number> = {};
 
   for (let idx = 0; idx < pages.length; idx++) {
     const page = pages[idx];
@@ -559,6 +569,9 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
     pagesWithIssues++;
     totalIssues += issues.length;
     totalFixable += issues.filter(i => i.fixable).length;
+    for (const [rule, count] of Object.entries(summarizeLintRules(issues))) {
+      ruleCounts[rule] = (ruleCounts[rule] ?? 0) + count;
+    }
 
     let fixCount = 0;
     if (opts.fix && issues.some(i => i.fixable)) {
@@ -580,6 +593,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
     total_issues: totalIssues,
     total_fixable: totalFixable,
     total_fixed: totalFixed,
+    rule_counts: Object.fromEntries(Object.entries(ruleCounts).sort(([a], [b]) => a.localeCompare(b))),
     dryRun: !!opts.dryRun,
     applied_fix: !!opts.fix,
   };
